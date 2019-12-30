@@ -1,0 +1,248 @@
+#!/usr/bin/env groovy
+
+GIT_PROJECT = ''
+GIT_CREDENTIALS_ID = 'f4ef7de3-ac6b-48d1-80f0-c7c49aa5f1e6' //maps to a Jenkins Credentials Vault ID
+echo "${env}"
+GIT_BRANCH = '${env.BRANCH_NAME}'
+ENV_NAME='${env.ENV_NAME}'
+echo "${environment}"
+node('master') {
+				
+	def mvnHome				
+	
+	stage('input action as per environment'){
+		if(project == 'Registry' || project == 'Gateway'){
+			echo 'Skipping Stage'
+			env.ACTION = 'Registry or Gateway Deployment'
+		}else{
+			if((environment == 'SIT' || environment == 'QA')){
+				env.ACTION = input message: 'Please choose the branch to build ', ok: 'Validate!',
+				parameters: [choice(name: 'ACTION', choices: "Deploy custom branch\nPush from lower environment\nRegistry or Gateway Deployment", description: 'Choose deployment?')]
+			}
+			if(environment == 'Dev'){
+				env.ACTION='Deploy custom branch'
+			}
+			if(environment == 'UAT'){
+				env.ACTION='Push from lower environment'
+			}
+		}
+	}
+	
+	stage('set git repo based on selected project'){
+	
+		if(project == 'FIDB Service'){
+			GIT_PROJECT = 'http://apprepo/scm/slvphas/fidbservice.git'
+		}
+		if(project == 'Pricing Engine'){
+			GIT_PROJECT = 'http://apprepo/scm/slvphas/pricingengineservice.git'
+		}
+		
+	}
+	
+	stage("get git branches for ${project}"){
+		
+		git url: GIT_PROJECT, credentialsId: GIT_CREDENTIALS_ID
+		sh '/usr/local/bin/git branch -r>branches.txt'
+		sh 'cut -d \'/\' -f 2 branches.txt >branch.txt'
+		
+	}
+	
+	stage('input branch'){
+		
+		liste = readFile 'branch.txt'
+		echo 'please click on the link here to chose the branch to build'
+		env.BRANCH_SCOPE = input message: 'Please choose the branch to build(in case of push form lower environment, choose branch with latest properties files) ', ok: 'Validate!',
+		parameters: [choice(name: 'BRANCH_NAME', choices: "${liste}", description: 'Branch to build?')]
+		
+	}
+	
+	stage("checkout and build ${project}"){
+		if(env.ACTION == 'Push from lower environment' || env.ACTION == 'Registry or Gateway Deployment'){
+			echo 'Skipping Stage'
+		}else{
+ 			mvnHome = '/usr/apache-maven-3.5.3/bin'
+			/*env.JAVA_HOME='/opt/jdk-12.0.2/'*/
+            env.JAVA_HOME='/opt/jdk1.8.0_121/'
+			def git_branch= "${env.BRANCH_SCOPE}"
+			echo git_branch
+			def git_branch_name = git_branch.replaceAll('origin/', '')
+			echo git_branch_name
+			git branch: git_branch_name, //,
+			credentialsId: GIT_CREDENTIALS_ID,
+			url: GIT_PROJECT
+
+ 			sh "'${mvnHome}'/mvn clean install -e -Dmaven.test.skip=true -Pdeveloper"  
+		}
+	}
+	
+	stage('deploy in chosen environment'){
+ 	    if(environment == 'Dev' && project == 'FIDB Service'){
+            sshagent(['312e24a5-cc67-4f25-9f7f-4fb719bfe1ca']){
+ 		       sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla02 /DATA/installations/fidbservice_dev/stop.sh"
+		       sh "scp ./src/main/resources/config/application-developer.yml  s-cdpdev@mumchsla02:/DATA/installations/fidbservice_dev/"
+		       sh "scp ./src/main/resources/config/application.yml  s-cdpdev@mumchsla02:/DATA/installations/fidbservice_dev/"
+		       sh "scp ./target/*.jar  s-cdpdev@mumchsla02:/DATA/installations/fidbservice_dev/"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla02 sh /DATA/installations/fidbservice_dev/start.sh"
+	        }
+        }
+		if(environment == 'Dev' && project == 'Pricing Engine'){
+			sshagent(['312e24a5-cc67-4f25-9f7f-4fb719bfe1ca']){
+ 		       sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla02 /DATA/installations/pricingengine_dev/stop.sh"
+		       sh "scp ./target/*.jar  s-cdpdev@mumchsla02:/DATA/installations/pricingengine_dev/"
+		       sh "scp ./src/main/resources/config/application.yml  s-cdpdev@mumchsla02:/DATA/installations/pricingengine_dev/"
+		       sh "scp ./src/main/resources/config/application-developer.yml  s-cdpdev@mumchsla02:/DATA/installations/pricingengine_dev/"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla02 sh /DATA/installations/pricingengine_dev/start.sh"
+	        }
+		}
+		if(environment == 'Dev' && project == 'Registry'){
+			sshagent(['312e24a5-cc67-4f25-9f7f-4fb719bfe1ca']){
+ 		       sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla02 /DATA/installations/registryStop.sh"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla02 sh /DATA/installations/registryStart.sh"
+	        }
+		}
+		if(environment == 'Dev' && project == 'Gateway'){
+			sshagent(['312e24a5-cc67-4f25-9f7f-4fb719bfe1ca']){
+ 		       sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla02 /DATA/installations/gatewayStop.sh"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla02 sh /DATA/installations/gatewayStart.sh"
+	        }
+		}
+	    if(environment == 'SIT' && project == 'FIDB Service'){
+			if( env.ACTION == 'Push from lower environment'){
+				sh'cd target/ && mkdir deployedInDev'
+				sshagent(['312e24a5-cc67-4f25-9f7f-4fb719bfe1ca']){
+					sh "scp s-cdpdev@mumchsla02:/DATA/installations/fidbservice_dev/*.jar ./target/deployedInDev/"
+				}
+				sshagent(['8e444d95-8335-4ea3-b927-95fe3c6f01ab']){
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/fidbservice_sit/stop.sh"
+				   sh "scp ./target/deployedInDev/*.jar  s-cdpqc@mumchsla04:/Data/installations/fidbservice_sit/"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpqc@mumchsla04:/Data/installations/fidbservice_sit/"
+				   sh "scp ./src/main/resources/config/application-sit.yml  s-cdpqc@mumchsla04:/Data/installations/fidbservice_sit/application-developer.yml"
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 sh /Data/installations/fidbservice_sit/start.sh"
+				}
+				sh 'cd target/ && rm -r deployedInDev'
+			}else{
+				sshagent(['8e444d95-8335-4ea3-b927-95fe3c6f01ab']){
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/fidbservice_sit/stop.sh"
+				   sh "scp ./target/*.jar  s-cdpqc@mumchsla04:/Data/installations/fidbservice_sit/"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpqc@mumchsla04:/Data/installations/fidbservice_sit/"
+				   sh "scp ./src/main/resources/config/application-sit.yml  s-cdpqc@mumchsla04:/Data/installations/fidbservice_sit/application-developer.yml"
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 sh /Data/installations/fidbservice_sit/start.sh"
+				}
+			}
+	    }
+		if(environment == 'SIT' && project == 'Pricing Engine'){
+			if( env.ACTION == 'Push from lower environment'){
+				sh'cd target/ && mkdir deployedInDev'
+				sshagent(['312e24a5-cc67-4f25-9f7f-4fb719bfe1ca']){
+					sh "scp s-cdpdev@mumchsla02:/DATA/installations/pricingengine_dev/*.jar ./target/deployedInDev/"
+				}
+				sshagent(['8e444d95-8335-4ea3-b927-95fe3c6f01ab']){
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/pricingengine_sit/stop.sh"
+				   sh "scp ./target/deployedInDev/*.jar  s-cdpqc@mumchsla04:/Data/installations/pricingservice_sit/"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpqc@mumchsla04:/Data/installations/pricingservice_sit/"
+				   sh "scp ./src/main/resources/config/application-sit.yml  s-cdpqc@mumchsla04:/Data/installations/pricingservice_sit/application-developer.yml"
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 sh /Data/installations/pricingservice_sit/start.sh"
+				}
+				sh 'cd target/ && rm -r deployedInDev'
+			}else{
+				sshagent(['8e444d95-8335-4ea3-b927-95fe3c6f01ab']){
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/pricingservice_sit/stop.sh"
+				   sh "scp ./target/*.jar  s-cdpqc@mumchsla04:/Data/installations/pricingservice_sit/"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpqc@mumchsla04:/Data/installations/pricingservice_sit/"
+				   sh "scp ./src/main/resources/config/application-sit.yml  s-cdpqc@mumchsla04:/Data/installations/pricingservice_sit/application-developer.yml"
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 sh /Data/installations/pricingservice_sit/start.sh"
+				}
+			}
+		}
+		if(environment == 'SIT' && project == 'Registry'){
+			sshagent(['8e444d95-8335-4ea3-b927-95fe3c6f01ab']){
+ 		       sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/registryStop.sh"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/registryStart.sh"
+	        }
+		}
+		if(environment == 'SIT' && project == 'Gateway'){
+			sshagent(['8e444d95-8335-4ea3-b927-95fe3c6f01ab']){
+ 		       sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/gatewayStop.sh"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/gatewayStart.sh"
+	        }
+		}
+		if(environment == 'QA' && project == 'FIDB Service'){
+		   if( env.ACTION == 'Push from lower environment'){
+			   sh'cd target/ && mkdir deployedInSIT'
+			   sshagent(['8e444d95-8335-4ea3-b927-95fe3c6f01ab']){
+				   sh "scp s-cdpqc@mumchsla04:/Data/installations/fidbservice_sit/*.jar ./target/deployedInSIT/"
+			   }
+			   sh 'cd target/deployedInSIT && ls -lrth'
+				sshagent(['ffec0a6b-0ec3-4754-9566-8a7673a97982']){
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 /Data/installations/fidbservice_qa/stop.sh"
+				   sh "scp ./target/deployedInSIT/*.jar  s-cdpdev@mumchsla03:/Data/installations/fidbservice_qa/"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpdev@mumchsla03:/Data/installations/fidbservice_qa/"
+				   sh "scp ./src/main/resources/config/application-qc.yml  s-cdpdev@mumchsla03:/Data/installations/fidbservice_qa/application-developer.yml"
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 sh /Data/installations/fidbservice_qa/start.sh"
+				}
+				sh 'cd target/ && rm -r deployedInSIT'
+			}else{
+				sshagent(['ffec0a6b-0ec3-4754-9566-8a7673a97982']){
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 /Data/installations/fidbservice_qa/stop.sh"
+				   sh "scp ./target/*.jar  s-cdpdev@mumchsla03:/Data/installations/fidbservice_qa/"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpdev@mumchsla03:/Data/installations/fidbservice_qa/"
+				   sh "scp ./src/main/resources/config/application-qc.yml  s-cdpdev@mumchsla03:/Data/installations/fidbservice_qa/application-developer.yml"
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 sh /Data/installations/fidbservice_qa/start.sh"
+				}
+			}
+	    }
+		if(environment == 'QA' && project == 'Pricing Engine'){
+			if( env.ACTION == 'Push from lower environment'){
+			   sh'cd target/ && mkdir deployedInSIT'
+			   sshagent(['8e444d95-8335-4ea3-b927-95fe3c6f01ab']){
+				   sh "scp s-cdpqc@mumchsla04:/Data/installations/pricingservice_sit/*.jar ./target/deployedInSIT/"
+			   }
+			   sh 'cd target/deployedInSIT && ls -lrth'
+				sshagent(['ffec0a6b-0ec3-4754-9566-8a7673a97982']){
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 /Data/installations/pricingservice_qa/stop.sh"
+				   sh "scp ./target/deployedInSIT/*.jar  s-cdpdev@mumchsla03:/Data/installations/pricingservice_qa/"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpdev@mumchsla03:/Data/installations/pricingservice_qa/"
+				   sh "scp ./src/main/resources/config/application-qc.yml  s-cdpdev@mumchsla03:/Data/installations/pricingservice_qa/application-developer.yml"
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 sh /Data/installations/pricingservice_qa/start.sh"
+				}
+				sh 'cd target/ && rm -r deployedInSIT'
+			}else{
+				sshagent(['ffec0a6b-0ec3-4754-9566-8a7673a97982']){
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 /Data/installations/pricingservice_qa/stop.sh"
+				   sh "scp ./target/*.jar  s-cdpdev@mumchsla03:/Data/installations/pricingservice_qa/"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpdev@mumchsla03:/Data/installations/pricingservice_qa/"
+				   sh "scp ./src/main/resources/config/application-qc.yml  s-cdpdev@mumchsla03:/Data/installations/pricingservice_qa/application-developer.yml"
+				   sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 sh /Data/installations/pricingservice_qa/start.sh"
+				}
+			}
+		}
+	    if(environment == 'UAT' && project == 'FIDB Service'){
+           sshagent(['ffec0a6b-0ec3-4754-9566-8a7673a97982']){
+		       sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 /Data/installations/fidbservice_uat/stop.sh"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpdev@mumchsla03:/Data/installations/fidbservice_uat/"
+				   sh "scp ./src/main/resources/config/application-uat.yml  s-cdpdev@mumchsla03:/Data/installations/fidbservice_uat/application-developer.yml"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 sh /Data/installations/fidbservice_uat/start.sh"
+	        }
+	    }
+		if(environment == 'UAT' && project == 'Pricing Engine'){
+			sshagent(['ffec0a6b-0ec3-4754-9566-8a7673a97982']){
+ 		       sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 /Data/installations/pricingservice_uat/stop.sh"
+				   sh "scp ./src/main/resources/config/application.yml  s-cdpdev@mumchsla03:/Data/installations/pricingservice_uat/"
+				   sh "scp ./src/main/resources/config/application-uat.yml  s-cdpdev@mumchsla03:/Data/installations/pricingservice_uat/application-developer.yml"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpdev@mumchsla03 sh /Data/installations/pricingservice_uat/start.sh"
+	        }
+		}
+		if((environment == 'QA' || environment == 'UAT') && project == 'Registry'){
+			sshagent(['ffec0a6b-0ec3-4754-9566-8a7673a97982']){
+ 		       sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/registryStop.sh"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/registryStart.sh"
+	        }
+		}
+		if((environment == 'QA' || environment == 'UAT')  && project == 'Gateway'){
+			sshagent(['ffec0a6b-0ec3-4754-9566-8a7673a97982']){
+ 		       sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/gatewayStop.sh"
+   	           sh "ssh -o StrictHostKeyChecking=no s-cdpqc@mumchsla04 /Data/installations/gatewayStart.sh"
+	        }
+		}
+    }
+}
